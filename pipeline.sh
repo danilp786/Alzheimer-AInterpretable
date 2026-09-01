@@ -1,74 +1,53 @@
 #!/usr/bin/env bash
 
-###############################################################################
-#PARÁMETROS QUE DEBE ADAPTAR EL USUARIO
-#---------------------------------------
-#
-#--trim-length
-#    Longitud final utilizada por Deblur.
-#    Debe determinarse a partir de la distribución de longitudes
-#    después del merge.
-#
-#--primer-error-rate
-#    Tolerancia de error para la identificación de primers.
-#    Ajustar según la calidad y variabilidad esperada de los primers.
-#
-#--threads
-#    Número de hilos disponibles en el sistema.
-#
-#--classifier
-#    Clasificador SILVA compatible con la región amplificada.
-###############################################################################
-
 set -euo pipefail
 
 
 ###############################################################################
-# PIPELINE 16S V3-V4: SRA -> ASVs (Deblur) -> SILVA 138 taxonomy
+# PIPELINE 16S rRNA V3-V4
 #
 # Flujo:
-#   FASTQ paired-end
-#       ↓
-#   Importación QIIME 2
-#       ↓
-#   Eliminación de primers 341F / 805R
-#       ↓
-#   Eliminación de pares sin primers
-#       ↓
-#   Merge R1 + R2
-#       ↓
-#   Deblur
-#       ↓
-#   ASVs
-#       ↓
-#   Clasificación taxonómica SILVA
 #
-# Uso:
-#   ./pipeline.sh \
-#       --input /ruta/fastq \
-#       --metadata /ruta/SraRunTable.csv \
-#       --classifier /ruta/silva_classifier.qza \
-#       --trim-length 250 \
-#       --output /ruta/resultado
+# SRA FASTQ
+#   ↓
+# Importación paired-end
+#   ↓
+# Eliminación de primers
+#   ↓
+# Merge forward + reverse
+#   ↓
+# Deblur
+#   ↓
+# ASVs
+#   ↓
+# Clasificación taxonómica SILVA 138 V3-V4
+#
+# Además:
+#   SraRunTable.csv
+#       ↓
+#   selección únicamente de muestras 16S_V3/4
+#       ↓
+#   metadata_V3-V4.tsv
 #
 ###############################################################################
 
-THREADS=8
 
-INPUT=""
+###############################################################################
+# 1. ARGUMENTOS
+###############################################################################
+
+FASTQ_DIR=""
 METADATA=""
 CLASSIFIER=""
-TRIM_LENGTH=""
-OUTPUT=""
+OUTPUT="results"
 
-###############################################################################
-# ARGUMENTOS
-###############################################################################
 
 while [[ $# -gt 0 ]]; do
+
     case "$1" in
-        --input)
-            INPUT="$2"
+
+        --fastq-dir)
+            FASTQ_DIR="$2"
             shift 2
             ;;
 
@@ -82,67 +61,74 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
 
-        --trim-length)
-            TRIM_LENGTH="$2"
-            shift 2
-            ;;
-
         --output)
             OUTPUT="$2"
             shift 2
             ;;
 
-        --threads)
-            THREADS="$2"
-            shift 2
-            ;;
-
         *)
-            echo "Argumento desconocido: $1"
+            echo "ERROR: argumento desconocido: $1"
             exit 1
             ;;
+
     esac
+
 done
 
+
 ###############################################################################
-# COMPROBACIÓN DE ARGUMENTOS
+# 2. COMPROBAR ARGUMENTOS
 ###############################################################################
 
-if [[ -z "$INPUT" ||
-      -z "$METADATA" ||
-      -z "$CLASSIFIER" ||
-      -z "$TRIM_LENGTH" ||
-      -z "$OUTPUT" ]]; then
-
-    echo ""
-    echo "Uso:"
-    echo "./pipeline.sh \\"
-    echo "    --input /ruta/fastq \\"
-    echo "    --metadata /ruta/SraRunTable.csv \\"
-    echo "    --classifier /ruta/silva_classifier.qza \\"
-    echo "    --trim-length 250 \\"
-    echo "    --output /ruta/resultado \\"
-    echo "    --threads 8"
-    echo ""
+if [[ -z "$FASTQ_DIR" ]]; then
+    echo "ERROR: falta --fastq-dir"
     exit 1
 fi
 
-###############################################################################
-# VALIDACIÓN DE PARÁMETROS
-###############################################################################
-
-if ! [[ "$THREADS" =~ ^[0-9]+$ ]] || [[ "$THREADS" -lt 1 ]]; then
-    echo "ERROR: --threads debe ser un número entero mayor que 0."
+if [[ -z "$METADATA" ]]; then
+    echo "ERROR: falta --metadata"
     exit 1
 fi
 
-if ! [[ "$TRIM_LENGTH" =~ ^[0-9]+$ ]] || [[ "$TRIM_LENGTH" -lt 1 ]]; then
-    echo "ERROR: --trim-length debe ser un número entero mayor que 0."
+if [[ -z "$CLASSIFIER" ]]; then
+    echo "ERROR: falta --classifier"
     exit 1
 fi
 
+
 ###############################################################################
-# DIRECTORIOS
+# 3. COMPROBAR ARCHIVOS
+###############################################################################
+
+if [[ ! -d "$FASTQ_DIR" ]]; then
+    echo "ERROR: no existe el directorio FASTQ:"
+    echo "$FASTQ_DIR"
+    exit 1
+fi
+
+if [[ ! -f "$METADATA" ]]; then
+    echo "ERROR: no existe el metadata:"
+    echo "$METADATA"
+    exit 1
+fi
+
+if [[ ! -f "$CLASSIFIER" ]]; then
+    echo "ERROR: no existe el clasificador:"
+    echo "$CLASSIFIER"
+    exit 1
+fi
+
+if ! command -v qiime >/dev/null 2>&1; then
+    echo "ERROR: QIIME 2 no está disponible."
+    echo "Ejecuta primero:"
+    echo
+    echo "conda activate qiime2-2021.4"
+    exit 1
+fi
+
+
+###############################################################################
+# 4. CREAR DIRECTORIOS
 ###############################################################################
 
 mkdir -p "$OUTPUT"
@@ -150,108 +136,246 @@ mkdir -p "$OUTPUT"
 mkdir -p "$OUTPUT/01_import"
 mkdir -p "$OUTPUT/02_quality"
 mkdir -p "$OUTPUT/03_primers"
-mkdir -p "$OUTPUT/04_merge"
+mkdir -p "$OUTPUT/04_merged"
 mkdir -p "$OUTPUT/05_deblur"
 mkdir -p "$OUTPUT/06_taxonomy"
+mkdir -p "$OUTPUT/07_metadata"
+
 
 ###############################################################################
-# COMPROBACIONES
+# 5. CREAR METADATA V3-V4
 ###############################################################################
 
-command -v qiime >/dev/null 2>&1 || {
-    echo "ERROR: QIIME 2 no está disponible."
-    exit 1
-}
+echo
+echo "======================================================"
+echo "5. FILTRANDO METADATA V3-V4"
+echo "======================================================"
 
-[[ -d "$INPUT" ]] || {
-    echo "ERROR: No existe el directorio FASTQ: $INPUT"
-    exit 1
-}
+python3 <<PY
 
-[[ -f "$METADATA" ]] || {
-    echo "ERROR: No existe el metadata: $METADATA"
-    exit 1
-}
+import csv
 
-[[ -f "$CLASSIFIER" ]] || {
-    echo "ERROR: No existe el clasificador SILVA:"
-    echo "$CLASSIFIER"
-    exit 1
-}
+input_file = "$METADATA"
+output_file = "$OUTPUT/07_metadata/metadata_V3-V4.tsv"
+
+with open(input_file, "r", encoding="utf-8-sig", newline="") as f:
+
+    reader = csv.DictReader(f)
+
+    if "Run" not in reader.fieldnames:
+        raise SystemExit("ERROR: no existe la columna Run")
+
+    if "Library Name" not in reader.fieldnames:
+        raise SystemExit("ERROR: no existe la columna Library Name")
+
+    rows = []
+
+    for row in reader:
+
+        library = row["Library Name"]
+
+        # Las muestras V3-V4 tienen:
+        #
+        # 16S_V3/4
+        #
+        # en Library Name.
+
+        if "16S_V3/4" in library:
+            rows.append(row)
+
+
+if len(rows) == 0:
+    raise SystemExit(
+        "ERROR: no se encontraron muestras V3-V4"
+    )
+
+
+fieldnames = reader.fieldnames
+
+
+with open(output_file, "w", encoding="utf-8", newline="") as f:
+
+    writer = csv.writer(f, delimiter="\t")
+
+    # QIIME necesita sample-id como primera columna
+    writer.writerow(["sample-id"] + fieldnames)
+
+    for row in rows:
+
+        writer.writerow(
+            [row["Run"]] +
+            [row[field] for field in fieldnames]
+        )
+
+
+print()
+print("Muestras V3-V4 encontradas:", len(rows))
+print("Metadata:", output_file)
+
+if len(rows) != 101:
+
+    print()
+    print("ADVERTENCIA:")
+    print("Se esperaban 101 muestras V3-V4.")
+    print("Se encontraron:", len(rows))
+
+PY
+
 
 ###############################################################################
-# INFORMACIÓN DE LA EJECUCIÓN
+# 6. CREAR MANIFEST PAIRED-END
 ###############################################################################
 
-echo ""
-echo "============================================================"
-echo "CONFIGURACIÓN"
-echo "============================================================"
-echo "Input:          $INPUT"
-echo "Metadata:       $METADATA"
-echo "Classifier:     $CLASSIFIER"
-echo "Trim length:    $TRIM_LENGTH"
-echo "Threads:        $THREADS"
-echo "Output:         $OUTPUT"
-echo "============================================================"
-echo ""
+echo
+echo "======================================================"
+echo "6. CREANDO MANIFEST PAIRED-END"
+echo "======================================================"
 
-{
-    echo "date=$(date -Iseconds)"
-    echo "hostname=$(hostname)"
-    echo "threads=$THREADS"
-    echo "trim_length=$TRIM_LENGTH"
-    echo "input=$INPUT"
-    echo "metadata=$METADATA"
-    echo "classifier=$CLASSIFIER"
-    qiime info
-} > "$OUTPUT/run-info.txt"
+MANIFEST="$OUTPUT/01_import/manifest.tsv"
+
+echo -e "sample-id\tforward-absolute-filepath\treverse-absolute-filepath" \
+    > "$MANIFEST"
+
 
 ###############################################################################
-# 1. IMPORTACIÓN DE FASTQ
+# Buscar los FASTQ correspondientes a cada Run.
+#
+# Se admiten nombres:
+#
+# SRRxxxx_1.fastq.gz
+# SRRxxxx_2.fastq.gz
+#
+# SRRxxxx_R1.fastq.gz
+# SRRxxxx_R2.fastq.gz
+#
 ###############################################################################
 
-echo ""
-echo "============================================================"
-echo "1. IMPORTACIÓN DE FASTQ"
-echo "============================================================"
+python3 <<PY
+
+import csv
+import os
+
+metadata_file = "$OUTPUT/07_metadata/metadata_V3-V4.tsv"
+fastq_dir = "$FASTQ_DIR"
+manifest_file = "$MANIFEST"
+
+
+with open(metadata_file, "r", encoding="utf-8") as f:
+
+    reader = csv.DictReader(f, delimiter="\t")
+
+    samples = [row["sample-id"] for row in reader]
+
+
+with open(manifest_file, "a", encoding="utf-8") as out:
+
+    for sample in samples:
+
+        forward_candidates = [
+            os.path.join(fastq_dir, sample + "_1.fastq.gz"),
+            os.path.join(fastq_dir, sample + "_R1.fastq.gz"),
+            os.path.join(fastq_dir, sample + "_1.fastq"),
+            os.path.join(fastq_dir, sample + "_R1.fastq"),
+        ]
+
+        reverse_candidates = [
+            os.path.join(fastq_dir, sample + "_2.fastq.gz"),
+            os.path.join(fastq_dir, sample + "_R2.fastq.gz"),
+            os.path.join(fastq_dir, sample + "_2.fastq"),
+            os.path.join(fastq_dir, sample + "_R2.fastq"),
+        ]
+
+        forward = None
+        reverse = None
+
+        for f in forward_candidates:
+
+            if os.path.exists(f):
+                forward = os.path.abspath(f)
+                break
+
+        for f in reverse_candidates:
+
+            if os.path.exists(f):
+                reverse = os.path.abspath(f)
+                break
+
+        if forward is None:
+            raise SystemExit(
+                f"ERROR: no se encontró R1 para {sample}"
+            )
+
+        if reverse is None:
+            raise SystemExit(
+                f"ERROR: no se encontró R2 para {sample}"
+            )
+
+        out.write(
+            f"{sample}\t{forward}\t{reverse}\n"
+        )
+
+
+print("Manifest creado correctamente.")
+print("Muestras:", len(samples))
+
+PY
+
+
+###############################################################################
+# 7. IMPORTAR FASTQ PAIRED-END A QIIME 2
+###############################################################################
+
+echo
+echo "======================================================"
+echo "7. IMPORTANDO FASTQ PAIRED-END"
+echo "======================================================"
 
 qiime tools import \
     --type 'SampleData[PairedEndSequencesWithQuality]' \
-    --input-path "$INPUT" \
-    --input-format CasavaOneEightSingleLanePerSampleDirFmt \
+    --input-path "$MANIFEST" \
+    --input-format PairedEndFastqManifestPhred33V2 \
     --output-path "$OUTPUT/01_import/demux-paired.qza"
 
+
 ###############################################################################
-# 2. CONTROL DE CALIDAD INICIAL
+# 8. VISUALIZAR CALIDAD
 ###############################################################################
 
-echo ""
-echo "============================================================"
-echo "2. CONTROL DE CALIDAD INICIAL"
-echo "============================================================"
+echo
+echo "======================================================"
+echo "8. CONTROL DE CALIDAD"
+echo "======================================================"
 
 qiime demux summarize \
     --i-data "$OUTPUT/01_import/demux-paired.qza" \
-    --o-visualization "$OUTPUT/02_quality/demux-summary.qzv"
+    --o-visualization "$OUTPUT/02_quality/demux-paired.qzv"
+
 
 ###############################################################################
-# 3. ELIMINACIÓN DE PRIMERS
+# 9. ELIMINACIÓN DE PRIMERS
+###############################################################################
+
+echo
+echo "======================================================"
+echo "9. ELIMINANDO PRIMERS"
+echo "======================================================"
+
 #
 # 341F:
-#   CCTACGGGNGGCWGCAG
+#
+# CCTACGGGNGGCWGCAG
 #
 # 805R:
-#   GACTACHVGGGTATCTAATCC
 #
-# Se eliminan únicamente los pares donde se hayan encontrado
-# los primers.
+# GACTACHVGGGTATCTAATCC
+#
+#
+# Se eliminan:
+#
+#   341F del comienzo de R1
+#   805R del comienzo de R2
+#
 ###############################################################################
-
-echo ""
-echo "============================================================"
-echo "3. ELIMINACIÓN DE PRIMERS"
-echo "============================================================"
 
 qiime cutadapt trim-paired \
     --i-demultiplexed-sequences "$OUTPUT/01_import/demux-paired.qza" \
@@ -259,148 +383,172 @@ qiime cutadapt trim-paired \
     --p-front-r GACTACHVGGGTATCTAATCC \
     --p-error-rate 0.1 \
     --p-match-adapter-wildcards \
-    --p-discard-untrimmed \
     --o-trimmed-sequences "$OUTPUT/03_primers/primer-trimmed.qza" \
     --verbose
 
+
 ###############################################################################
-# 4. MERGE R1 + R2
+# 10. MERGE FORWARD + REVERSE
 ###############################################################################
 
-echo ""
-echo "============================================================"
-echo "4. MERGE DE READS FORWARD + REVERSE"
-echo "============================================================"
+echo
+echo "======================================================"
+echo "10. MERGE FORWARD + REVERSE"
+echo "======================================================"
 
-qiime vsearch merge-pairs \
+qiime vsearch join-pairs \
     --i-demultiplexed-seqs "$OUTPUT/03_primers/primer-trimmed.qza" \
-    --o-merged-sequences "$OUTPUT/04_merge/merged.qza"
+    --o-joined-sequences "$OUTPUT/04_merged/merged.qza"
+
+
+###############################################################################
+# 11. VISUALIZAR READS MERGEADOS
+###############################################################################
+
+echo
+echo "======================================================"
+echo "11. RESUMEN DE READS MERGEADOS"
+echo "======================================================"
 
 qiime demux summarize \
-    --i-data "$OUTPUT/04_merge/merged.qza" \
-    --o-visualization "$OUTPUT/04_merge/merged-summary.qzv"
+    --i-data "$OUTPUT/04_merged/merged.qza" \
+    --o-visualization "$OUTPUT/04_merged/merged.qzv"
+
 
 ###############################################################################
-# 5. DEBLUR
+# 12. DEBLUR
+###############################################################################
+
+echo
+echo "======================================================"
+echo "12. DEBLUR"
+echo "======================================================"
+
 #
-# TRIM_LENGTH se proporciona mediante:
+# IMPORTANTE:
 #
-#   --trim-length 250
+# Aquí debes poner exactamente el trim-length que utilizamos
+# en el análisis original.
 #
 ###############################################################################
 
-echo ""
-echo "============================================================"
-echo "5. DEBLUR"
-echo "============================================================"
+TRIM_LENGTH=XXX
+
+
+if [[ "$TRIM_LENGTH" == "XXX" ]]; then
+
+    echo
+    echo "ERROR:"
+    echo "Debes establecer TRIM_LENGTH."
+    echo
+    echo "Edita:"
+    echo
+    echo "TRIM_LENGTH=XXX"
+    echo
+    exit 1
+
+fi
+
 
 qiime deblur denoise-16S \
-    --i-demultiplexed-seqs "$OUTPUT/04_merge/merged.qza" \
+    --i-demultiplexed-seqs "$OUTPUT/04_merged/merged.qza" \
     --p-trim-length "$TRIM_LENGTH" \
     --p-sample-stats \
-    --p-jobs "$THREADS" \
-    --o-representative-sequences "$OUTPUT/05_deblur/rep-seqs-deblur.qza" \
-    --o-table "$OUTPUT/05_deblur/table-deblur.qza" \
-    --o-stats "$OUTPUT/05_deblur/deblur-stats.qza"
+    --o-representative-sequences \
+        "$OUTPUT/05_deblur/rep-seqs-deblur.qza" \
+    --o-table \
+        "$OUTPUT/05_deblur/table-deblur.qza" \
+    --o-stats \
+        "$OUTPUT/05_deblur/deblur-stats.qza"
+
 
 ###############################################################################
-# 6. VISUALIZACIÓN DE LAS STATS DE DEBLUR
+# 13. VISUALIZAR ESTADÍSTICAS DE DEBLUR
 ###############################################################################
 
-echo ""
-echo "============================================================"
-echo "6. STATS DE DEBLUR"
-echo "============================================================"
+echo
+echo "======================================================"
+echo "13. DEBLUR STATS"
+echo "======================================================"
 
 qiime deblur visualize-stats \
     --i-deblur-stats "$OUTPUT/05_deblur/deblur-stats.qza" \
     --o-visualization "$OUTPUT/05_deblur/deblur-stats.qzv"
 
+
 ###############################################################################
-# 7. RESUMEN DE LA TABLA DE ASVs
+# 14. RESUMEN DE LA TABLA ASV
 ###############################################################################
 
-echo ""
-echo "============================================================"
-echo "7. RESUMEN DE TABLA DE ASVs"
-echo "============================================================"
+echo
+echo "======================================================"
+echo "14. RESUMEN TABLA ASV"
+echo "======================================================"
 
 qiime feature-table summarize \
     --i-table "$OUTPUT/05_deblur/table-deblur.qza" \
-    --m-sample-metadata-file "$METADATA" \
+    --m-sample-metadata-file "$OUTPUT/07_metadata/metadata_V3-V4.tsv" \
     --o-visualization "$OUTPUT/05_deblur/table-deblur.qzv"
 
-###############################################################################
-# 8. VISUALIZACIÓN DE LAS SECUENCIAS REPRESENTATIVAS
-###############################################################################
-
-echo ""
-echo "============================================================"
-echo "8. VISUALIZACIÓN DE LAS SECUENCIAS REPRESENTATIVAS"
-echo "============================================================"
-
-qiime feature-table tabulate-seqs \
-    --i-data "$OUTPUT/05_deblur/rep-seqs-deblur.qza" \
-    --o-visualization "$OUTPUT/05_deblur/rep-seqs-deblur.qzv"
 
 ###############################################################################
-# 9. CLASIFICACIÓN TAXONÓMICA CON SILVA
-#
-# El clasificador se proporciona mediante:
-#
-#   --classifier /ruta/silva_classifier.qza
-#
+# 15. CLASIFICACIÓN TAXONÓMICA CON SILVA
 ###############################################################################
 
-echo ""
-echo "============================================================"
-echo "9. CLASIFICACIÓN TAXONÓMICA SILVA"
-echo "============================================================"
+echo
+echo "======================================================"
+echo "15. CLASIFICACIÓN TAXONÓMICA SILVA 138"
+echo "======================================================"
 
 qiime feature-classifier classify-sklearn \
     --i-classifier "$CLASSIFIER" \
     --i-reads "$OUTPUT/05_deblur/rep-seqs-deblur.qza" \
     --o-classification "$OUTPUT/06_taxonomy/taxonomy.qza"
 
+
 ###############################################################################
-# 10. VISUALIZACIÓN DE TAXONOMÍA
+# 16. VISUALIZAR TAXONOMÍA
 ###############################################################################
 
-echo ""
-echo "============================================================"
-echo "10. VISUALIZACIÓN DE TAXONOMÍA"
-echo "============================================================"
+echo
+echo "======================================================"
+echo "16. VISUALIZANDO TAXONOMÍA"
+echo "======================================================"
 
 qiime metadata tabulate \
     --m-input-file "$OUTPUT/06_taxonomy/taxonomy.qza" \
     --o-visualization "$OUTPUT/06_taxonomy/taxonomy.qzv"
 
+
 ###############################################################################
-# FIN
+# 17. FIN
 ###############################################################################
 
-echo ""
-echo "============================================================"
-echo "PIPELINE FINALIZADO"
-echo "============================================================"
-echo ""
+echo
+echo
+echo "======================================================"
+echo "PIPELINE COMPLETADO"
+echo "======================================================"
 
-echo "ASV table:"
-echo "$OUTPUT/05_deblur/table-deblur.qza"
-echo ""
+echo
+echo "Metadata V3-V4:"
+echo "  $OUTPUT/07_metadata/metadata_V3-V4.tsv"
 
-echo "ASV representative sequences:"
-echo "$OUTPUT/05_deblur/rep-seqs-deblur.qza"
-echo ""
+echo
+echo "Tabla ASV:"
+echo "  $OUTPUT/05_deblur/table-deblur.qza"
 
-echo "Deblur statistics:"
-echo "$OUTPUT/05_deblur/deblur-stats.qzv"
-echo ""
+echo
+echo "Secuencias representativas:"
+echo "  $OUTPUT/05_deblur/rep-seqs-deblur.qza"
 
-echo "Taxonomy:"
-echo "$OUTPUT/06_taxonomy/taxonomy.qza"
-echo ""
+echo
+echo "Deblur stats:"
+echo "  $OUTPUT/05_deblur/deblur-stats.qza"
 
-echo "Taxonomy visualization:"
-echo "$OUTPUT/06_taxonomy/taxonomy.qzv"
-echo ""
+echo
+echo "Taxonomía:"
+echo "  $OUTPUT/06_taxonomy/taxonomy.qza"
+
+echo
+echo "======================================================"
