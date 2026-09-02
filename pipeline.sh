@@ -383,6 +383,7 @@ qiime cutadapt trim-paired \
     --p-front-r GACTACHVGGGTATCTAATCC \
     --p-error-rate 0.1 \
     --p-match-adapter-wildcards \
+    --p-discard-untrimmed \
     --o-trimmed-sequences "$OUTPUT/03_primers/primer-trimmed.qza" \
     --verbose
 
