@@ -428,7 +428,7 @@ echo "======================================================"
 #
 # IMPORTANTE:
 #
-# Aquí debes poner exactamente el trim-length que utilizamos
+# Aquí se debe introducir exactamente el trim-length utilizado
 # en el análisis original.
 #
 ###############################################################################
