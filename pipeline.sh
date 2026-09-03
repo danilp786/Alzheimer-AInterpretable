@@ -5,35 +5,6 @@ set -euo pipefail
 
 ###############################################################################
 # PIPELINE 16S rRNA V3-V4
-#
-# Flujo:
-#
-# SRA FASTQ
-#   ↓
-# Importación paired-end
-#   ↓
-# Eliminación de primers
-#   ↓
-# Merge forward + reverse
-#   ↓
-# Deblur
-#   ↓
-# ASVs
-#   ↓
-# Clasificación taxonómica SILVA 138 V3-V4
-#
-# Además:
-#   SraRunTable.csv
-#       ↓
-#   selección únicamente de muestras 16S_V3/4
-#       ↓
-#   metadata_V3-V4.tsv
-#
-###############################################################################
-
-
-###############################################################################
-# 1. ARGUMENTOS
 ###############################################################################
 
 FASTQ_DIR=""
@@ -41,6 +12,10 @@ METADATA=""
 CLASSIFIER=""
 OUTPUT="results"
 
+
+###############################################################################
+# 1. ARGUMENTOS
+###############################################################################
 
 while [[ $# -gt 0 ]]; do
 
@@ -97,7 +72,7 @@ fi
 
 
 ###############################################################################
-# 3. COMPROBAR ARCHIVOS
+# 3. COMPROBAR ARCHIVOS Y QIIME 2
 ###############################################################################
 
 if [[ ! -d "$FASTQ_DIR" ]]; then
@@ -151,6 +126,7 @@ echo "======================================================"
 echo "5. FILTRANDO METADATA V3-V4"
 echo "======================================================"
 
+
 python3 <<PY
 
 import csv
@@ -174,20 +150,12 @@ with open(input_file, "r", encoding="utf-8-sig", newline="") as f:
 
         library = row["Library Name"]
 
-        # Las muestras V3-V4 tienen:
-        #
-        # 16S_V3/4
-        #
-        # en Library Name.
-
         if "16S_V3/4" in library:
             rows.append(row)
 
 
 if len(rows) == 0:
-    raise SystemExit(
-        "ERROR: no se encontraron muestras V3-V4"
-    )
+    raise SystemExit("ERROR: no se encontraron muestras V3-V4")
 
 
 fieldnames = reader.fieldnames
@@ -197,7 +165,6 @@ with open(output_file, "w", encoding="utf-8", newline="") as f:
 
     writer = csv.writer(f, delimiter="\t")
 
-    # QIIME necesita sample-id como primera columna
     writer.writerow(["sample-id"] + fieldnames)
 
     for row in rows:
@@ -231,24 +198,13 @@ echo "======================================================"
 echo "6. CREANDO MANIFEST PAIRED-END"
 echo "======================================================"
 
+
 MANIFEST="$OUTPUT/01_import/manifest.tsv"
+
 
 echo -e "sample-id\tforward-absolute-filepath\treverse-absolute-filepath" \
     > "$MANIFEST"
 
-
-###############################################################################
-# Buscar los FASTQ correspondientes a cada Run.
-#
-# Se admiten nombres:
-#
-# SRRxxxx_1.fastq.gz
-# SRRxxxx_2.fastq.gz
-#
-# SRRxxxx_R1.fastq.gz
-# SRRxxxx_R2.fastq.gz
-#
-###############################################################################
 
 python3 <<PY
 
@@ -322,13 +278,14 @@ PY
 
 
 ###############################################################################
-# 7. IMPORTAR FASTQ PAIRED-END A QIIME 2
+# 7. IMPORTAR FASTQ PAIRED-END
 ###############################################################################
 
 echo
 echo "======================================================"
 echo "7. IMPORTANDO FASTQ PAIRED-END"
 echo "======================================================"
+
 
 qiime tools import \
     --type 'SampleData[PairedEndSequencesWithQuality]' \
@@ -338,13 +295,14 @@ qiime tools import \
 
 
 ###############################################################################
-# 8. VISUALIZAR CALIDAD
+# 8. VISUALIZAR CALIDAD DE LOS READS ORIGINALES
 ###############################################################################
 
 echo
 echo "======================================================"
-echo "8. CONTROL DE CALIDAD"
+echo "8. CALIDAD DE READS ORIGINALES"
 echo "======================================================"
+
 
 qiime demux summarize \
     --i-data "$OUTPUT/01_import/demux-paired.qza" \
@@ -360,22 +318,6 @@ echo "======================================================"
 echo "9. ELIMINANDO PRIMERS"
 echo "======================================================"
 
-#
-# 341F:
-#
-# CCTACGGGNGGCWGCAG
-#
-# 805R:
-#
-# GACTACHVGGGTATCTAATCC
-#
-#
-# Se eliminan:
-#
-#   341F del comienzo de R1
-#   805R del comienzo de R2
-#
-###############################################################################
 
 qiime cutadapt trim-paired \
     --i-demultiplexed-sequences "$OUTPUT/01_import/demux-paired.qza" \
@@ -397,9 +339,10 @@ echo "======================================================"
 echo "10. MERGE FORWARD + REVERSE"
 echo "======================================================"
 
+
 qiime vsearch join-pairs \
     --i-demultiplexed-seqs "$OUTPUT/03_primers/primer-trimmed.qza" \
-    --o-joined-sequences "$OUTPUT/04_merged/merged.qza"
+    --o-joined-sequences "$OUTPUT/04_merged/joined.qza"
 
 
 ###############################################################################
@@ -411,48 +354,58 @@ echo "======================================================"
 echo "11. RESUMEN DE READS MERGEADOS"
 echo "======================================================"
 
+
 qiime demux summarize \
-    --i-data "$OUTPUT/04_merged/merged.qza" \
-    --o-visualization "$OUTPUT/04_merged/merged.qzv"
+    --i-data "$OUTPUT/04_merged/joined.qza" \
+    --o-visualization "$OUTPUT/04_merged/joined.qzv"
 
 
 ###############################################################################
-# 12. DEBLUR
+# 12. FILTRADO DE CALIDAD PHRED
 ###############################################################################
 
 echo
 echo "======================================================"
-echo "12. DEBLUR"
+echo "12. FILTRADO DE CALIDAD PHRED"
 echo "======================================================"
 
-#
-# IMPORTANTE:
-#
-# Aquí se debe introducir exactamente el trim-length utilizado
-# en el análisis original.
-#
+
+qiime quality-filter q-score \
+    --i-demux "$OUTPUT/04_merged/joined.qza" \
+    --o-filtered-sequences "$OUTPUT/04_merged/filtered.qza" \
+    --o-filter-stats "$OUTPUT/04_merged/filter-stats.qza"
+
+
+###############################################################################
+# 13. ESTADÍSTICAS DEL FILTRADO DE CALIDAD
 ###############################################################################
 
-TRIM_LENGTH=XXX
+echo
+echo "======================================================"
+echo "13. ESTADÍSTICAS DEL FILTRADO DE CALIDAD"
+echo "======================================================"
 
 
-if [[ "$TRIM_LENGTH" == "XXX" ]]; then
+qiime metadata tabulate \
+    --m-input-file "$OUTPUT/04_merged/filter-stats.qza" \
+    --o-visualization "$OUTPUT/04_merged/filter-stats.qzv"
 
-    echo
-    echo "ERROR:"
-    echo "Debes establecer TRIM_LENGTH."
-    echo
-    echo "Edita:"
-    echo
-    echo "TRIM_LENGTH=XXX"
-    echo
-    exit 1
 
-fi
+###############################################################################
+# 14. DEBLUR
+###############################################################################
+
+echo
+echo "======================================================"
+echo "14. DEBLUR"
+echo "======================================================"
+
+
+TRIM_LENGTH=440
 
 
 qiime deblur denoise-16S \
-    --i-demultiplexed-seqs "$OUTPUT/04_merged/merged.qza" \
+    --i-demultiplexed-seqs "$OUTPUT/04_merged/filtered.qza" \
     --p-trim-length "$TRIM_LENGTH" \
     --p-sample-stats \
     --o-representative-sequences \
@@ -464,13 +417,14 @@ qiime deblur denoise-16S \
 
 
 ###############################################################################
-# 13. VISUALIZAR ESTADÍSTICAS DE DEBLUR
+# 15. ESTADÍSTICAS DE DEBLUR
 ###############################################################################
 
 echo
 echo "======================================================"
-echo "13. DEBLUR STATS"
+echo "15. DEBLUR STATS"
 echo "======================================================"
+
 
 qiime deblur visualize-stats \
     --i-deblur-stats "$OUTPUT/05_deblur/deblur-stats.qza" \
@@ -478,13 +432,14 @@ qiime deblur visualize-stats \
 
 
 ###############################################################################
-# 14. RESUMEN DE LA TABLA ASV
+# 16. RESUMEN DE LA TABLA ASV
 ###############################################################################
 
 echo
 echo "======================================================"
-echo "14. RESUMEN TABLA ASV"
+echo "16. RESUMEN TABLA ASV"
 echo "======================================================"
+
 
 qiime feature-table summarize \
     --i-table "$OUTPUT/05_deblur/table-deblur.qza" \
@@ -493,13 +448,14 @@ qiime feature-table summarize \
 
 
 ###############################################################################
-# 15. CLASIFICACIÓN TAXONÓMICA CON SILVA
+# 17. CLASIFICACIÓN TAXONÓMICA CON SILVA 138
 ###############################################################################
 
 echo
 echo "======================================================"
-echo "15. CLASIFICACIÓN TAXONÓMICA SILVA 138"
+echo "17. CLASIFICACIÓN TAXONÓMICA SILVA 138"
 echo "======================================================"
+
 
 qiime feature-classifier classify-sklearn \
     --i-classifier "$CLASSIFIER" \
@@ -508,13 +464,14 @@ qiime feature-classifier classify-sklearn \
 
 
 ###############################################################################
-# 16. VISUALIZAR TAXONOMÍA
+# 18. VISUALIZAR TAXONOMÍA
 ###############################################################################
 
 echo
 echo "======================================================"
-echo "16. VISUALIZANDO TAXONOMÍA"
+echo "18. VISUALIZANDO TAXONOMÍA"
 echo "======================================================"
+
 
 qiime metadata tabulate \
     --m-input-file "$OUTPUT/06_taxonomy/taxonomy.qza" \
@@ -522,13 +479,13 @@ qiime metadata tabulate \
 
 
 ###############################################################################
-# 17. FIN
+# 19. FIN
 ###############################################################################
 
 echo
 echo
 echo "======================================================"
-echo "PIPELINE COMPLETADO"
+echo "PIPELINE COMPLETADA"
 echo "======================================================"
 
 echo
